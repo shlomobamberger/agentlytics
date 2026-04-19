@@ -1,0 +1,634 @@
+import { useState, useEffect, useMemo, useCallback } from 'react'
+import { Lightbulb, AlertTriangle, AlertCircle, Info, FileCode, Plug, Cpu, Sparkles, ChevronDown, ChevronRight, FolderOpen, ExternalLink, Copy, Check, ArrowDownUp, ChevronsDown, ChevronsUp } from 'lucide-react'
+import { fetchSuggestions } from '../lib/api'
+import AnimatedLoader from '../components/AnimatedLoader'
+import PageHeader from '../components/PageHeader'
+import KpiCard from '../components/KpiCard'
+import EditorIcon from '../components/EditorIcon'
+import { formatNumber, editorColor, editorLabel } from '../lib/constants'
+
+const MONO = 'JetBrains Mono, monospace'
+
+const SEVERITY_META = {
+  high:   { label: 'HIGH',   color: '#ef4444', bg: 'rgba(239,68,68,0.12)',  icon: AlertCircle },
+  medium: { label: 'MEDIUM', color: '#f59e0b', bg: 'rgba(245,158,11,0.12)', icon: AlertTriangle },
+  low:    { label: 'LOW',    color: '#3b82f6', bg: 'rgba(59,130,246,0.12)', icon: Info },
+}
+
+const SEVERITY_WEIGHT = { high: 3, medium: 2, low: 1 }
+
+const CATEGORY_META = {
+  rules:  { label: 'Rules',  icon: FileCode },
+  mcp:    { label: 'MCP',    icon: Plug },
+  model:  { label: 'Model',  icon: Cpu },
+  skills: { label: 'Skills', icon: Sparkles },
+  agents: { label: 'Agents', icon: Sparkles },
+  hooks:  { label: 'Hooks',  icon: Plug },
+}
+
+const SUPPORTED_EDITORS = ['cursor', 'claude-code']
+
+function wastedUsdOf(s) {
+  return s?.impact?.usdWasted || 0
+}
+
+function SuggestionCard({ sugg, open, onToggle }) {
+  const [copied, setCopied] = useState(false)
+  const [pathCopied, setPathCopied] = useState(false)
+  const sev = SEVERITY_META[sugg.severity] || SEVERITY_META.low
+  const cat = CATEGORY_META[sugg.category] || { label: sugg.category, icon: Info }
+  const edSource = sugg._editor || null
+  const edColor = edSource ? editorColor(edSource) : null
+  const SevIcon = sev.icon
+  const CatIcon = cat.icon
+  const imp = sugg.impact || {}
+  const wastedTokens = imp.tokensWasted != null
+    ? imp.tokensWasted
+    : (imp.tokensPerRequest && imp.requestsObserved ? imp.tokensPerRequest * imp.requestsObserved : null)
+  const wastedUsd = imp.usdWasted != null ? imp.usdWasted : null
+  const usdEstimated = imp.usdEstimated === true
+  const fmtUsd = n => n < 0.01 ? '<$0.01' : `${usdEstimated ? '~' : ''}$${n.toFixed(2)}`
+
+  const cleanDetail = (sugg.detail || '').replace(/\n*(?:Damage|Est\. waste) so far:[^\n]*\n*/g, '\n').trim()
+  const scopeType = sugg.scope?.type
+  const isGlobal = scopeType === 'global'
+  const isMulti = scopeType === 'multi'
+  const folders = sugg.scope?.folders || (sugg.scope?.folder ? [sugg.scope.folder] : [])
+  const folder = sugg.scope?.folder
+  const projectName = folder ? folder.split('/').pop() : null
+  const scopePillLabel = isGlobal ? 'Global' : isMulti ? `${folders.length} projects` : 'Project'
+  const scopePillColor = isGlobal ? '#818cf8' : isMulti ? '#f59e0b' : '#10b981'
+  const scopePillBg = isGlobal ? 'rgba(129,140,248,0.15)' : isMulti ? 'rgba(245,158,11,0.15)' : 'rgba(16,185,129,0.15)'
+  const buildClipText = () => {
+    const lines = []
+    lines.push(`[${sugg.severity.toUpperCase()}] ${sugg.title}`)
+    lines.push(`Scope: ${scopePillLabel}`)
+    if (folders.length) lines.push(`Folders:\n${folders.map(f => '  - ' + f).join('\n')}`)
+    if (imp.tokensPerRequest) lines.push(`Tokens per turn: ${imp.tokensPerRequest}`)
+    if (imp.requestsObserved) lines.push(`Turns observed: ${imp.requestsObserved}`)
+    if (imp.tokensWasted) lines.push(`Tokens wasted: ${imp.tokensWasted}`)
+    if (imp.usdWasted) lines.push(`Est. waste: ${fmtUsd(imp.usdWasted)}`)
+    lines.push('')
+    lines.push(cleanDetail)
+    if (sugg.fix) {
+      lines.push('')
+      lines.push(`Fix: ${sugg.fix.hint}`)
+      if (sugg.fix.path) lines.push(`Path: ${sugg.fix.path}`)
+    }
+    return lines.join('\n')
+  }
+
+  const copy = (e) => {
+    e.stopPropagation()
+    try {
+      navigator.clipboard.writeText(open ? buildClipText() : sugg.title)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch { /* clipboard denied */ }
+  }
+
+  const copyPath = (e) => {
+    e.stopPropagation()
+    try {
+      navigator.clipboard.writeText(sugg.fix.path)
+      setPathCopied(true)
+      setTimeout(() => setPathCopied(false), 1500)
+    } catch { /* clipboard denied */ }
+  }
+
+  const targetPath = sugg.fix?.path || null
+  const targetRel = targetPath && folder && targetPath.startsWith(folder + '/')
+    ? targetPath.slice(folder.length + 1)
+    : (targetPath && targetPath.startsWith('/Users/') ? targetPath.replace(/^.*\/(\.cursor|\.claude)\//, '$1/') : targetPath)
+
+  const Field = ({ label, value, mono, color, title }) => (
+    <div className="flex flex-col min-w-0">
+      <span className="text-[9px] uppercase tracking-wider mb-0.5" style={{ color: 'var(--c-text3)' }}>{label}</span>
+      <span
+        className="text-[11px] font-medium truncate"
+        style={{ color: color || 'var(--c-white)', fontFamily: mono ? MONO : undefined }}
+        title={title}
+      >
+        {value}
+      </span>
+    </div>
+  )
+
+  return (
+    <div className="card overflow-hidden">
+      <button
+        onClick={onToggle}
+        className="w-full flex items-stretch text-left hover:bg-[var(--c-bg3)] transition"
+      >
+        <div className="shrink-0 w-1" style={{ background: sev.color }} />
+
+        <div className="flex-1 min-w-0 px-3 py-2.5 flex items-center gap-3">
+          <div className="flex items-center justify-center shrink-0 w-7 h-7 rounded" style={{ background: sev.bg }}>
+            <SevIcon size={14} style={{ color: sev.color }} />
+          </div>
+
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className="text-[13px] font-semibold" style={{ color: 'var(--c-white)' }}>{sugg.title}</span>
+              {edSource && (
+                <span
+                  className="text-[9px] font-bold px-1 py-px rounded uppercase tracking-wide inline-flex items-center gap-1"
+                  style={{ background: edColor + '20', color: edColor }}
+                >
+                  <EditorIcon source={edSource} size={10} />
+                  {editorLabel(edSource)}
+                </span>
+              )}
+              <span className="text-[9px] font-bold px-1 py-px rounded" style={{ background: sev.bg, color: sev.color }}>{sev.label}</span>
+              <span
+                className="text-[9px] font-medium px-1 py-px rounded flex items-center gap-0.5"
+                style={{ background: 'var(--c-bg3)', color: 'var(--c-text2)' }}
+              >
+                <CatIcon size={9} />
+                {cat.label}
+              </span>
+              <span
+                className="text-[9px] font-bold px-1.5 py-px rounded uppercase tracking-wide"
+                style={{ background: scopePillBg, color: scopePillColor }}
+              >
+                {scopePillLabel}
+              </span>
+              {!isMulti && projectName && (
+                <span className="text-[10px] truncate" style={{ color: 'var(--c-text2)', fontFamily: MONO, maxWidth: 320 }} title={folder}>
+                  {projectName}
+                </span>
+              )}
+              {isMulti && (
+                <span className="text-[10px] truncate" style={{ color: 'var(--c-text2)', fontFamily: MONO, maxWidth: 420 }} title={folders.join('\n')}>
+                  {folders.slice(0, 2).map(f => f.split('/').pop()).join(', ')}{folders.length > 2 ? ` +${folders.length - 2}` : ''}
+                </span>
+              )}
+            </div>
+          </div>
+
+          {wastedUsd != null && wastedUsd > 0 && (
+            <div className="shrink-0 text-right px-2.5 py-1 rounded" style={{ background: 'rgba(239,68,68,0.12)' }}>
+              <div className="text-[14px] font-bold" style={{ color: '#ef4444', fontFamily: MONO }}>{fmtUsd(wastedUsd)}</div>
+              <div className="text-[9px] uppercase tracking-wide" style={{ color: '#ef4444' }}>est. waste</div>
+            </div>
+          )}
+
+          <span
+            role="button"
+            tabIndex={0}
+            onClick={copy}
+            onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') copy(e) }}
+            className="shrink-0 p-1 rounded hover:bg-[var(--c-bg4,#222)]"
+            title={copied ? 'Copied!' : (open ? 'Copy full alert' : 'Copy title')}
+            style={{ color: copied ? '#10b981' : 'var(--c-text3)', cursor: 'pointer' }}
+          >
+            {copied ? <Check size={14} /> : <Copy size={14} />}
+          </span>
+
+          {open ? <ChevronDown size={14} style={{ color: 'var(--c-text3)' }} /> : <ChevronRight size={14} style={{ color: 'var(--c-text3)' }} />}
+        </div>
+      </button>
+
+      {open && (
+        <div className="px-4 pb-3 pt-3" style={{ borderTop: '1px solid var(--c-border)' }}>
+          <div
+            className="grid gap-3 mb-3 pb-3"
+            style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', borderBottom: '1px solid var(--c-border)' }}
+          >
+            <Field label="Scope" value={scopePillLabel} color={scopePillColor} />
+            {!isGlobal && !isMulti && projectName && <Field label="Project" value={projectName} mono title={folder} />}
+            {!isGlobal && !isMulti && folder && <Field label="Folder" value={folder} mono title={folder} />}
+            {targetRel && <Field label="File" value={targetRel} mono title={targetPath} />}
+            <Field label="Category" value={cat.label} />
+            <Field label="Severity" value={sev.label} color={sev.color} />
+            {imp.tokensPerRequest != null && imp.tokensPerRequest > 0 && (
+              <Field label="Tok / turn" value={formatNumber(imp.tokensPerRequest)} mono />
+            )}
+            {imp.requestsObserved != null && imp.requestsObserved > 0 && (
+              <Field label="Turns observed" value={formatNumber(imp.requestsObserved)} mono />
+            )}
+            {wastedTokens != null && wastedTokens > 0 && (
+              <Field label="Tok wasted" value={formatNumber(wastedTokens)} color="#f59e0b" mono />
+            )}
+            {wastedUsd != null && wastedUsd > 0 && (
+              <Field label="Est. waste" value={fmtUsd(wastedUsd)} color="#ef4444" mono />
+            )}
+          </div>
+
+          {isMulti && folders.length > 0 && (
+            <div className="mb-3">
+              <div className="text-[10px] uppercase tracking-wider mb-1" style={{ color: 'var(--c-text3)' }}>Affected projects ({folders.length})</div>
+              <div className="flex flex-col gap-0.5">
+                {folders.map(f => (
+                  <div key={f} className="text-[11px] flex items-center gap-1 truncate" style={{ color: 'var(--c-text2)', fontFamily: MONO }}>
+                    <FolderOpen size={10} className="shrink-0" style={{ color: 'var(--c-text3)' }} />
+                    <span className="truncate" title={f}>{f}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          <div className="text-[10px] uppercase tracking-wider mb-1" style={{ color: 'var(--c-text3)' }}>What's wrong</div>
+          <div className="text-[11px] mb-3 whitespace-pre-wrap" style={{ color: 'var(--c-text)', lineHeight: 1.55 }}>
+            {cleanDetail}
+          </div>
+
+          {sugg.fix && (
+            <div
+              className="text-[11px] p-2 rounded"
+              style={{ background: 'var(--c-bg3)', border: '1px solid var(--c-border)' }}
+            >
+              <div className="flex items-center justify-between mb-1">
+                <div className="text-[10px] uppercase tracking-wider" style={{ color: 'var(--c-text3)' }}>Fix</div>
+                {sugg.fix.path && (
+                  <button
+                    onClick={copyPath}
+                    className="text-[10px] inline-flex items-center gap-1 px-1.5 py-0.5 rounded hover:bg-[var(--c-bg4,#222)] transition"
+                    style={{ color: pathCopied ? '#10b981' : 'var(--c-text3)' }}
+                    title={pathCopied ? 'Copied!' : 'Copy path'}
+                  >
+                    {pathCopied ? <Check size={10} /> : <Copy size={10} />}
+                    {pathCopied ? 'Copied' : 'Copy path'}
+                  </button>
+                )}
+              </div>
+              <div style={{ color: 'var(--c-white)' }}>{sugg.fix.hint}</div>
+              {sugg.fix.path && (
+                <div className="mt-1 text-[10px] flex items-center gap-1 truncate" style={{ color: 'var(--c-text3)', fontFamily: MONO }}>
+                  <ExternalLink size={9} />
+                  <span className="truncate" title={sugg.fix.path}>{sugg.fix.path}</span>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function PricingNote({ pricing }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div
+      className="text-[11px] px-2.5 py-1 rounded inline-flex flex-wrap items-center gap-2"
+      style={{
+        background: 'rgba(245,158,11,0.08)',
+        border: '1px solid rgba(245,158,11,0.25)',
+        color: 'var(--c-text2)',
+      }}
+    >
+      <Info size={11} style={{ color: '#f59e0b' }} />
+      <span>$ figures estimated (Sonnet-tier fallback)</span>
+      {pricing.realInputTokensObserved > 0 && (
+        <span style={{ color: 'var(--c-text3)', fontFamily: MONO }}>
+          · ≈${pricing.realInputCostAtFallback.toFixed(2)} ceiling
+        </span>
+      )}
+      <button
+        onClick={() => setOpen(!open)}
+        className="text-[10px] underline"
+        style={{ color: '#f59e0b' }}
+      >
+        {open ? 'Hide' : 'Why?'}
+      </button>
+      {open && (
+        <div className="basis-full pt-1 mt-1" style={{ borderTop: '1px solid rgba(245,158,11,0.2)', color: 'var(--c-text2)' }}>
+          {pricing.note}
+          {pricing.realInputTokensObserved > 0 && (
+            <>
+              {' '}Real input observed: <strong>{formatNumber(pricing.realInputTokensObserved)}</strong> tokens ≈{' '}
+              <strong>${pricing.realInputCostAtFallback.toFixed(2)}</strong> at the same fallback rate — use as ceiling reference.
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+export default function Suggestions() {
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [severityFilter, setSeverityFilter] = useState('all')
+  const [categoryFilter, setCategoryFilter] = useState(null)
+  const [editor, setEditor] = useState(null)
+  const [sortBy, setSortBy] = useState('severity')
+  const [expandedIds, setExpandedIds] = useState(() => new Set())
+  const [collapsedGroups, setCollapsedGroups] = useState(() => new Set())
+
+  useEffect(() => {
+    setLoading(true)
+    const editors = editor ? [editor] : SUPPORTED_EDITORS
+    Promise.all(editors.map(ed => fetchSuggestions(ed).then(d => ({ ed, d }))))
+      .then(results => {
+        const mergedSuggestions = []
+        let projectsInspected = 0
+        let totalSessionsAnalyzed = 0
+        let anyEstimated = false
+        let pricingNote = null
+        let realInputTokensObserved = 0
+        let realInputCostAtFallback = 0
+        for (const { ed, d } of results) {
+          if (!d || d.error) continue
+          projectsInspected += d.projectsInspected || 0
+          totalSessionsAnalyzed += d.totalSessionsAnalyzed || 0
+          if (d.pricing?.estimated) { anyEstimated = true; pricingNote = d.pricing.note }
+          realInputTokensObserved += d.pricing?.realInputTokensObserved || 0
+          realInputCostAtFallback += d.pricing?.realInputCostAtFallback || 0
+          for (const s of (d.suggestions || [])) {
+            mergedSuggestions.push({ ...s, _editor: ed, id: `${ed}:${s.id}` })
+          }
+        }
+        setData({
+          editor,
+          projectsInspected,
+          totalSessionsAnalyzed,
+          suggestions: mergedSuggestions,
+          pricing: {
+            estimated: anyEstimated,
+            note: pricingNote,
+            realInputTokensObserved,
+            realInputCostAtFallback,
+          },
+        })
+      })
+      .finally(() => setLoading(false))
+  }, [editor])
+
+  const filtered = useMemo(() => {
+    if (!data?.suggestions) return []
+    const out = data.suggestions.filter(s =>
+      (severityFilter === 'all' || s.severity === severityFilter) &&
+      (categoryFilter == null || s.category === categoryFilter)
+    )
+    const cmp = sortBy === 'waste'
+      ? (a, b) => (wastedUsdOf(b) - wastedUsdOf(a)) || ((SEVERITY_WEIGHT[b.severity] || 0) - (SEVERITY_WEIGHT[a.severity] || 0))
+      : (a, b) => ((SEVERITY_WEIGHT[b.severity] || 0) - (SEVERITY_WEIGHT[a.severity] || 0)) || (wastedUsdOf(b) - wastedUsdOf(a))
+    return [...out].sort(cmp)
+  }, [data, severityFilter, categoryFilter, sortBy])
+
+  const counts = useMemo(() => {
+    const c = { high: 0, medium: 0, low: 0, total: 0, tokensTotal: 0, usdTotal: 0, byCategory: {} }
+    if (!data?.suggestions) return c
+    for (const s of data.suggestions) {
+      c[s.severity] = (c[s.severity] || 0) + 1
+      c.total++
+      c.byCategory[s.category] = (c.byCategory[s.category] || 0) + 1
+      const imp = s.impact || {}
+      if (imp.tokensWasted) c.tokensTotal += imp.tokensWasted
+      else if (imp.tokensPerRequest && imp.requestsObserved) c.tokensTotal += imp.tokensPerRequest * imp.requestsObserved
+      if (imp.usdWasted) c.usdTotal += imp.usdWasted
+    }
+    return c
+  }, [data])
+
+  const categories = useMemo(() => {
+    if (!data?.suggestions) return []
+    const set = new Set(data.suggestions.map(s => s.category))
+    return Array.from(set)
+  }, [data])
+
+  const grouped = useMemo(() => {
+    if (editor) return null
+    const map = new Map()
+    for (const s of filtered) {
+      const k = s._editor || 'other'
+      if (!map.has(k)) map.set(k, { editor: k, items: [], usdTotal: 0 })
+      const g = map.get(k)
+      g.items.push(s)
+      g.usdTotal += wastedUsdOf(s)
+    }
+    return Array.from(map.values()).sort((a, b) => b.usdTotal - a.usdTotal)
+  }, [filtered, editor])
+
+  const toggleOne = useCallback((id) => {
+    setExpandedIds(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id); else next.add(id)
+      return next
+    })
+  }, [])
+
+  const expandAll = () => setExpandedIds(new Set(filtered.map(s => s.id)))
+  const collapseAll = () => setExpandedIds(new Set())
+  const allExpanded = filtered.length > 0 && filtered.every(s => expandedIds.has(s.id))
+
+  const toggleGroup = (k) => {
+    setCollapsedGroups(prev => {
+      const next = new Set(prev)
+      if (next.has(k)) next.delete(k); else next.add(k)
+      return next
+    })
+  }
+
+  if (loading) return <AnimatedLoader label={`Analyzing ${editor ? editorLabel(editor) : 'all editors'} config...`} />
+  if (!data || data.error) {
+    return (
+      <div className="p-6 text-[12px]" style={{ color: 'var(--c-text2)' }}>
+        {data?.error || 'No data available'}
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-4">
+      <PageHeader icon={Lightbulb} title="Cost & Hygiene Suggestions">
+        <span className="text-[11px] ml-2" style={{ color: 'var(--c-text3)' }}>
+          {editor ? editorLabel(editor) : 'All editors'} · {data.projectsInspected} projects, {formatNumber(data.totalSessionsAnalyzed)} sessions analyzed
+        </span>
+      </PageHeader>
+
+      <div className="card p-3">
+        <div className="flex items-center flex-wrap gap-1.5">
+          {SUPPORTED_EDITORS.map(id => {
+            const isSelected = editor === id
+            return (
+              <button
+                key={id}
+                onClick={() => setEditor(isSelected ? null : id)}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-[12px] cursor-pointer transition rounded-sm"
+                style={{
+                  border: isSelected ? `1.5px solid ${editorColor(id)}` : '1px solid var(--c-border)',
+                  background: isSelected ? editorColor(id) + '15' : 'transparent',
+                  opacity: editor && !isSelected ? 0.4 : 1,
+                  color: 'var(--c-text)',
+                }}
+              >
+                <EditorIcon source={id} size={14} />
+                <span style={{ color: 'var(--c-text2)' }}>{editorLabel(id)}</span>
+              </button>
+            )
+          })}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-5 gap-3">
+        <KpiCard label="Total" value={formatNumber(counts.total)} />
+        <div className="card px-3 py-2">
+          <div className="text-base font-bold" style={{ color: '#ef4444' }}>{formatNumber(counts.high)}</div>
+          <div className="text-[11px]" style={{ color: 'var(--c-text2)' }}>High</div>
+        </div>
+        <div className="card px-3 py-2">
+          <div className="text-base font-bold" style={{ color: '#f59e0b' }}>{formatNumber(counts.medium)}</div>
+          <div className="text-[11px]" style={{ color: 'var(--c-text2)' }}>Medium</div>
+        </div>
+        <div className="card px-3 py-2">
+          <div className="text-base font-bold" style={{ color: '#3b82f6' }}>{formatNumber(counts.low)}</div>
+          <div className="text-[11px]" style={{ color: 'var(--c-text2)' }}>Low</div>
+        </div>
+        <div className="card px-3 py-2" title={data.pricing?.note || "Approximate input-token cost wasted on misconfigured always-on rules."}>
+          <div className="text-base font-bold" style={{ color: '#ef4444' }}>
+            {counts.usdTotal < 0.01 ? '<$0.01' : `~$${counts.usdTotal.toFixed(2)}`}
+          </div>
+          <div className="text-[11px]" style={{ color: 'var(--c-text2)' }}>
+            Est. waste so far{data.pricing?.estimated ? ' (est.)' : ''}
+          </div>
+        </div>
+      </div>
+
+      {data.pricing?.estimated && (
+        <PricingNote pricing={data.pricing} />
+      )}
+
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-[10px] font-medium" style={{ color: 'var(--c-text3)' }}>Severity:</span>
+        {['all', 'high', 'medium', 'low'].map(s => {
+          const meta = SEVERITY_META[s]
+          const SevIcon = meta?.icon
+          const active = severityFilter === s
+          const n = s === 'all' ? counts.total : (counts[s] || 0)
+          return (
+            <button
+              key={s}
+              onClick={() => setSeverityFilter(s)}
+              className="text-[10px] px-2 py-0.5 rounded transition inline-flex items-center gap-1"
+              style={{
+                background: active ? 'var(--c-card)' : 'transparent',
+                color: active ? (meta?.color || 'var(--c-white)') : 'var(--c-text2)',
+                border: '1px solid var(--c-border)',
+              }}
+            >
+              {SevIcon && <SevIcon size={10} />}
+              {s === 'all' ? 'All' : s.charAt(0).toUpperCase() + s.slice(1)}
+              <span className="opacity-60">{n}</span>
+            </button>
+          )
+        })}
+        <span className="ml-3 text-[10px] font-medium" style={{ color: 'var(--c-text3)' }}>Category:</span>
+        {categories.map(c => {
+          const meta = CATEGORY_META[c] || { label: c, icon: Info }
+          const CatIcon = meta.icon
+          const active = categoryFilter === c
+          const n = counts.byCategory[c] || 0
+          return (
+            <button
+              key={c}
+              onClick={() => setCategoryFilter(active ? null : c)}
+              className="text-[10px] px-2 py-0.5 rounded transition inline-flex items-center gap-1"
+              style={{
+                background: active ? 'var(--c-card)' : 'transparent',
+                color: active ? 'var(--c-white)' : 'var(--c-text2)',
+                border: '1px solid var(--c-border)',
+                opacity: categoryFilter && !active ? 0.5 : 1,
+              }}
+            >
+              <CatIcon size={10} />
+              {meta.label}
+              <span className="opacity-60">{n}</span>
+            </button>
+          )
+        })}
+      </div>
+
+      {filtered.length === 0 ? (
+        <div className="card p-6 text-center text-[12px]" style={{ color: 'var(--c-text2)' }}>
+          {data.suggestions.length === 0
+            ? 'No suggestions — your config looks good.'
+            : 'No suggestions match the current filters.'}
+        </div>
+      ) : (
+        <>
+          <div className="flex items-center justify-between gap-2">
+            <h3 className="text-[11px] font-medium uppercase tracking-wider inline-flex items-center gap-2" style={{ color: 'var(--c-text2)' }}>
+              Findings
+              <span style={{ color: 'var(--c-text3)' }}>
+                {filtered.length === counts.total ? `${counts.total}` : `${filtered.length} of ${counts.total}`}
+              </span>
+            </h3>
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={() => setSortBy(sortBy === 'severity' ? 'waste' : 'severity')}
+                className="text-[10px] px-2 py-0.5 rounded transition inline-flex items-center gap-1"
+                style={{ background: 'transparent', color: 'var(--c-text2)', border: '1px solid var(--c-border)' }}
+                title="Toggle sort order"
+              >
+                <ArrowDownUp size={10} />
+                Sort: {sortBy === 'waste' ? 'Waste $' : 'Severity'}
+              </button>
+              <button
+                onClick={allExpanded ? collapseAll : expandAll}
+                className="text-[10px] px-2 py-0.5 rounded transition inline-flex items-center gap-1"
+                style={{ background: 'transparent', color: 'var(--c-text2)', border: '1px solid var(--c-border)' }}
+              >
+                {allExpanded ? <ChevronsUp size={10} /> : <ChevronsDown size={10} />}
+                {allExpanded ? 'Collapse all' : 'Expand all'}
+              </button>
+            </div>
+          </div>
+
+          {grouped ? (
+            <div className="space-y-4">
+              {grouped.map(g => {
+                const collapsed = collapsedGroups.has(g.editor)
+                const c = editorColor(g.editor)
+                return (
+                  <div key={g.editor} className="space-y-2">
+                    <button
+                      onClick={() => toggleGroup(g.editor)}
+                      className="w-full flex items-center gap-2 text-left py-1"
+                    >
+                      {collapsed ? <ChevronRight size={12} style={{ color: 'var(--c-text3)' }} /> : <ChevronDown size={12} style={{ color: 'var(--c-text3)' }} />}
+                      <EditorIcon source={g.editor} size={14} />
+                      <span className="text-[12px] font-semibold" style={{ color: 'var(--c-white)' }}>{editorLabel(g.editor)}</span>
+                      <span className="text-[10px] px-1.5 py-px rounded" style={{ background: c + '20', color: c }}>{g.items.length}</span>
+                      {g.usdTotal > 0 && (
+                        <span className="text-[10px]" style={{ color: 'var(--c-text3)', fontFamily: MONO }}>
+                          ~${g.usdTotal.toFixed(2)}
+                        </span>
+                      )}
+                      <div className="flex-1 h-px" style={{ background: 'var(--c-border)' }} />
+                    </button>
+                    {!collapsed && (
+                      <div className="space-y-2">
+                        {g.items.map(s => (
+                          <SuggestionCard
+                            key={s.id}
+                            sugg={s}
+                            open={expandedIds.has(s.id)}
+                            onToggle={() => toggleOne(s.id)}
+                          />
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {filtered.map(s => (
+                <SuggestionCard
+                  key={s.id}
+                  sugg={s}
+                  open={expandedIds.has(s.id)}
+                  onToggle={() => toggleOne(s.id)}
+                />
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
