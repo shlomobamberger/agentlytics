@@ -47,6 +47,15 @@ yarn dlx agentlytics
 bunx agentlytics
 ```
 
+### Run a GitHub branch preview
+
+For an unreleased branch, use an explicit package and command name. The
+dashboard is built locally during install:
+
+```bash
+npx -y --package=github:OWNER/agentlytics#BRANCH agentlytics
+```
+
 Opens at **http://localhost:4637**. Requires Node.js ≥ 20.19 or ≥ 22.12, macOS. No data ever leaves your machine.
 
 ### Node.js

@@ -30,7 +30,8 @@
     "start": "node index.js",
     "build": "cd ui && npm install && npm run build",
     "dev": "cd ui && npm run dev",
-    "test": "node --test test/**/*.test.js"
+    "test": "node --test test/**/*.test.js",
+    "prepare": "npm run build"
   },
   "keywords": [
     "cursor",
