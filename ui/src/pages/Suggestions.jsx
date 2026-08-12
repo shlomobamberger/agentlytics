@@ -39,15 +39,23 @@ function buildFixSteps(sugg) {
   const steps = []
   const action = fix.action
   const serverMatch = sugg.title.match(/^([\w-]+):/)
-  const serverName = serverMatch ? serverMatch[1] : null
+  const serverName = fix.serverName || (serverMatch ? serverMatch[1] : null)
 
   switch (action) {
     case 'disable-tools':
+      {
+        const tools = fix.disabledTools || []
+        const disabledToolsCode = tools.length
+          ? `"disabledTools": [\n${tools.map(tool => `  "${tool}"`).join(',\n')}\n]`
+          : '"disabledTools": ["tool-a", "tool-b"]'
       steps.push({
         label: `Add \`disabledTools\` under "${serverName || 'server'}"`,
-        detail: 'List never-called tools from "What\'s wrong" above.',
-        code: `"${serverName || 'server-name'}": {\n  "command": "...",\n  "disabledTools": ["tool-a", "tool-b"]\n}`,
+        detail: tools.length
+          ? `Paste this exact property into the existing "${serverName}" entry. It disables ${tools.length} never-called tools and leaves rarely/actively used tools enabled.`
+          : 'List never-called tools from "What\'s wrong" above.',
+        code: disabledToolsCode,
       })
+      }
       break
     case 'disable-server':
     case 'remove-server':

@@ -901,6 +901,8 @@ function analyze(config, usage) {
       },
       fix: {
         action: 'disable-tools',
+        serverName,
+        disabledTools: neverCalled.map(t => t.name),
         hint: neverCalled.length
           ? `Set \`disabledTools: [${disabledArr}]\` on "${serverName}" in ~/.cursor/mcp.json`
           : `Review rarely-used tools under "${serverName}"`,

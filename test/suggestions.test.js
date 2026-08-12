@@ -62,4 +62,5 @@ test('reports never-called heavy MCP schemas as recurring context overhead', () 
   assert.match(finding.title, /uncalled\/rare tools/);
   assert.match(finding.detail, /create_pull_request/);
   assert.doesNotMatch(finding.detail, /Never called .*search_issues/s);
+  assert.deepEqual(finding.fix.disabledTools, ['create_pull_request']);
 });
