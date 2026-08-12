@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback } from 'react'
-import { Lightbulb, AlertTriangle, AlertCircle, Info, FileCode, Plug, Cpu, Sparkles, ChevronDown, ChevronRight, FolderOpen, ExternalLink, Copy, Check, ArrowDownUp, ChevronsDown, ChevronsUp } from 'lucide-react'
+import { Lightbulb, AlertTriangle, AlertCircle, Info, FileCode, Plug, Cpu, Sparkles, ChevronDown, ChevronRight, FolderOpen, ExternalLink, Copy, Check, ArrowDownUp, ChevronsDown, ChevronsUp, Wand2 } from 'lucide-react'
 import { fetchSuggestions } from '../lib/api'
 import AnimatedLoader from '../components/AnimatedLoader'
 import PageHeader from '../components/PageHeader'
@@ -28,8 +28,371 @@ const CATEGORY_META = {
 
 const SUPPORTED_EDITORS = ['cursor', 'claude-code']
 
+const RESTART_TEXT = {
+  cursor: 'Reload Cursor window (Cmd+Shift+P → "Developer: Reload Window") so MCP/rule changes take effect',
+  'claude-code': 'Restart your Claude Code session (exit + rerun) to reload config',
+}
+
+function buildFixSteps(sugg) {
+  const fix = sugg.fix
+  if (!fix) return []
+  const steps = []
+  const action = fix.action
+  const serverMatch = sugg.title.match(/^([\w-]+):/)
+  const serverName = serverMatch ? serverMatch[1] : null
+
+  switch (action) {
+    case 'disable-tools':
+      steps.push({
+        label: `Add \`disabledTools\` under "${serverName || 'server'}"`,
+        detail: 'List never-called tools from "What\'s wrong" above.',
+        code: `"${serverName || 'server-name'}": {\n  "command": "...",\n  "disabledTools": ["tool-a", "tool-b"]\n}`,
+      })
+      break
+    case 'disable-server':
+    case 'remove-server':
+    case 'disable-project-mcp':
+      steps.push({
+        label: serverName ? `Remove "${serverName}" from \`mcpServers\`` : 'Remove the server entry',
+        detail: 'Or mark disabled to keep the entry without loading it.',
+        code: `"${serverName || 'server-name'}": {\n  "command": "...",\n  "disabled": true\n}`,
+      })
+      break
+    case 'disable-plugin-server':
+      steps.push({
+        label: 'Disable the plugin that ships this server',
+        detail: 'Or ask the plugin author to remove the server.',
+        code: `{\n  "enabledPlugins": {\n    "<plugin-key>": false\n  }\n}`,
+      })
+      break
+    case 'change-model':
+      steps.push({
+        label: 'Switch default model to Sonnet',
+        detail: 'Opus still available per-session via `/model` or `--model`.',
+        code: `{\n  "model": "sonnet"\n}`,
+      })
+      break
+    case 'lower-effort':
+      steps.push({
+        label: 'Lower default effort level',
+        detail: 'High/max spends the full thinking budget every turn.',
+        code: `{\n  "effortLevel": "medium"\n}`,
+      })
+      break
+    case 'fix-rule':
+    case 'scope-rule':
+      steps.push({
+        label: 'Scope the rule via frontmatter',
+        detail: 'Loads only when matching files are opened.',
+        code: `---\ndescription: When working on X\nglobs: ["src/**/*.ts"]\nalwaysApply: false\n---`,
+      })
+      break
+    case 'scope-rules':
+      steps.push({
+        label: 'Add `paths:` to each rule file',
+        detail: 'Rule loads only when Claude reads a matching file.',
+        code: `---\npaths: ["src/**/*.ts"]\ndescription: TypeScript conventions\n---`,
+      })
+      break
+    case 'migrate':
+      steps.push({
+        label: 'Move `.cursorrules` → `.cursor/rules/<name>.mdc`',
+        detail: 'Delete `.cursorrules` afterwards — Cursor ignores it once `.cursor/rules/` exists.',
+        code: `.cursor/rules/conventions.mdc:\n---\ndescription: Project conventions\nglobs: ["**/*"]\nalwaysApply: false\n---\n\n<rule body>`,
+      })
+      break
+    case 'split-claude-md':
+      steps.push({
+        label: 'Split into skills or scoped rules',
+        detail: 'SKILL.md loads only on trigger; scoped rules load only on matching file open.',
+        code: `.claude/skills/<name>/SKILL.md:\n---\nname: <name>\ndescription: What it does + when to use it\n---\n\n<content>`,
+      })
+      break
+    case 'split-skill':
+      steps.push({
+        label: 'Move long content into `references/`',
+        detail: 'SKILL.md stays short; reference material loads on demand.',
+        code: `<skill>/\n├── SKILL.md       (behavior — short)\n└── references/\n    └── detail.md  (loaded on demand)`,
+      })
+      break
+    case 'add-description':
+    case 'improve-description':
+      steps.push({
+        label: 'Add/expand description frontmatter',
+        detail: 'Description drives when the agent triggers this.',
+        code: `---\nname: <name>\ndescription: <what it does>. Use when <trigger phrases>.\n---`,
+      })
+      break
+    case 'trim-description':
+      steps.push({
+        label: 'Trim description to ~250 chars',
+        detail: 'All subagent descriptions concatenate into parent startup context.',
+        code: `---\nname: <name>\ndescription: <one sentence what>. <one sentence when>.\n---`,
+      })
+      break
+    case 'fix-name':
+      steps.push({
+        label: 'Match frontmatter name to folder name',
+        code: `---\nname: <folder-name>\n---`,
+      })
+      break
+    case 'restrict-tools':
+      steps.push({
+        label: 'Restrict tool set in frontmatter',
+        detail: 'Only grant tools this subagent actually needs.',
+        code: `---\nname: <name>\ntools: Read, Grep, Glob\n---`,
+      })
+      break
+    case 'trim-subagent':
+      steps.push({
+        label: 'Shrink subagent body',
+        detail: 'Move reference material into skills the subagent loads on demand.',
+      })
+      break
+    case 'disable-plugin':
+    case 'disable-plugin-rules':
+      steps.push({
+        label: 'Disable the plugin in `~/.claude/settings.json`',
+        code: `{\n  "enabledPlugins": {\n    "<plugin-key>": false\n  }\n}`,
+      })
+      break
+    case 'review-statusline':
+      steps.push({
+        label: 'Bound the statusLine command',
+        detail: 'Fast (<50ms), short output.',
+        code: `"statusLine": {\n  "type": "command",\n  "command": "your-cmd | head -c 120"\n}`,
+      })
+      break
+    case 'review-hook':
+      steps.push({
+        label: 'Bound, gate, or remove the hook',
+        detail: 'Pipe output through `head -n 5`, add a condition, or delete it if unused.',
+      })
+      break
+    case 'review-shell':
+      steps.push({
+        label: 'Keep `!`<cmd>`` output short — or call a script',
+        detail: fix.hint,
+      })
+      break
+    case 'trim-servers':
+      steps.push({
+        label: 'Move project servers into per-project config',
+        detail: 'Keep global `~/.claude.json` / `~/.cursor/mcp.json` minimal. Project servers live in `.mcp.json` or `projects[<folder>].mcpServers`.',
+      })
+      break
+    case 'trim-skills':
+      steps.push({
+        label: 'Delete unused skills, tighten descriptions',
+        detail: 'Aim <200 chars each. Remove skills you never invoke.',
+      })
+      break
+    case 'add-triggers':
+      steps.push({
+        label: 'Add trigger phrases to description',
+        detail: 'Agent matches user intent to descriptions — be explicit.',
+        code: `---\ndescription: <what>. Trigger on "<phrase-1>", "<phrase-2>".\n---`,
+      })
+      break
+    case 'consolidate':
+      steps.push({
+        label: 'Scope the always-on rules',
+        detail: 'Add `globs:` / `paths:` frontmatter so each loads only when needed.',
+      })
+      break
+    default:
+      steps.push({ label: fix.hint })
+  }
+
+  if (sugg._editor && RESTART_TEXT[sugg._editor]) {
+    steps.push({ label: RESTART_TEXT[sugg._editor] })
+  }
+
+  return steps
+}
+
+function buildFixPrompt(sugg) {
+  const cleanDetail = (sugg.detail || '').replace(/\n*(?:Damage|Est\. waste) so far:[^\n]*\n*/g, '\n').trim()
+  const lines = []
+  lines.push(`Please fix a ${sugg._editor || 'editor'} cost/hygiene issue in my config.`)
+  lines.push('')
+  lines.push(`## Problem`)
+  lines.push(sugg.title)
+  if (sugg.fix?.path) lines.push(`File: ${sugg.fix.path}`)
+  if (sugg.scope?.type) lines.push(`Scope: ${sugg.scope.type}${sugg.scope.folder ? ` (${sugg.scope.folder})` : ''}`)
+  lines.push('')
+  lines.push(`## Details`)
+  lines.push(cleanDetail)
+  lines.push('')
+  lines.push(`## Action`)
+  lines.push(sugg.fix?.hint || 'Apply the recommended change above.')
+  lines.push('')
+  lines.push(`Read the file first, make the change, then show me the diff.`)
+  return lines.join('\n')
+}
+
 function wastedUsdOf(s) {
   return s?.impact?.usdWasted || 0
+}
+
+function FixActionBar({ sugg, onCopyPath, pathCopied }) {
+  const [promptCopied, setPromptCopied] = useState(false)
+  const path = sugg.fix?.path
+  const editor = sugg._editor
+  const vscodeUrl = path ? `vscode://file${path}` : null
+  const cursorUrl = path ? `cursor://file${path}` : null
+  const showCursor = path && (editor === 'cursor' || editor == null)
+  const showVscode = path
+
+  const copyPrompt = (e) => {
+    e.stopPropagation()
+    try {
+      navigator.clipboard.writeText(buildFixPrompt(sugg))
+      setPromptCopied(true)
+      setTimeout(() => setPromptCopied(false), 1500)
+    } catch { /* clipboard denied */ }
+  }
+
+  const btnBase = 'min-h-8 text-[10px] inline-flex items-center gap-1 px-2 py-1 rounded transition-[background-color,border-color,color,opacity,transform] active:scale-[0.96]'
+  const btnStyle = { background: 'var(--c-bg4,#272727)', color: 'var(--c-text)', border: '1px solid var(--c-border)' }
+
+  return (
+    <div className="flex items-center gap-1 flex-wrap">
+      {showCursor && (
+        <a
+          href={cursorUrl}
+          className={btnBase + ' hover:opacity-80'}
+          style={btnStyle}
+          title={`Open in Cursor: ${path}`}
+        >
+          <ExternalLink size={10} />
+          Open in Cursor
+        </a>
+      )}
+      {showVscode && (
+        <a
+          href={vscodeUrl}
+          className={btnBase + ' hover:opacity-80'}
+          style={btnStyle}
+          title={`Open in VS Code: ${path}`}
+        >
+          <ExternalLink size={10} />
+          Open in VS Code
+        </a>
+      )}
+      {path && (
+        <button
+          onClick={onCopyPath}
+          className={btnBase + ' hover:opacity-80'}
+          style={{ ...btnStyle, color: pathCopied ? '#10b981' : 'var(--c-text)' }}
+          title={pathCopied ? 'Copied!' : path}
+        >
+          {pathCopied ? <Check size={10} /> : <Copy size={10} />}
+          {pathCopied ? 'Copied' : 'Copy path'}
+        </button>
+      )}
+      <button
+        onClick={copyPrompt}
+        className={btnBase + ' hover:opacity-80'}
+        style={{
+          background: promptCopied ? 'rgba(16,185,129,0.15)' : 'rgba(129,140,248,0.15)',
+          color: promptCopied ? '#10b981' : '#818cf8',
+          border: `1px solid ${promptCopied ? 'rgba(16,185,129,0.4)' : 'rgba(129,140,248,0.4)'}`,
+        }}
+        title="Copy a ready-to-paste prompt for Claude Code / Cursor agent"
+      >
+        {promptCopied ? <Check size={10} /> : <Wand2 size={10} />}
+        {promptCopied ? 'Prompt copied' : 'Ask agent to fix'}
+      </button>
+    </div>
+  )
+}
+
+function FixSteps({ sugg, onCopyPath, pathCopied }) {
+  const steps = buildFixSteps(sugg)
+  const [copiedStep, setCopiedStep] = useState(-1)
+  const copyCode = (code, idx) => {
+    try {
+      navigator.clipboard.writeText(code)
+      setCopiedStep(idx)
+      setTimeout(() => setCopiedStep(-1), 1500)
+    } catch { /* clipboard denied */ }
+  }
+  const path = sugg.fix?.path
+  return (
+    <div
+        className="text-[11px] p-2.5 rounded"
+      style={{ background: 'var(--c-bg3)', border: '1px solid var(--c-border)' }}
+    >
+      <div className="flex items-start justify-between mb-2 gap-2 flex-wrap">
+        <div className="text-[10px] uppercase tracking-wider" style={{ color: 'var(--c-text3)' }}>How to fix</div>
+        <FixActionBar sugg={sugg} onCopyPath={onCopyPath} pathCopied={pathCopied} />
+      </div>
+      {path && (
+        <div
+          className="text-[10px] mb-2 px-2 py-1 rounded inline-flex items-center gap-1 max-w-full"
+          style={{ background: 'var(--c-bg4,#272727)', color: 'var(--c-text2)', fontFamily: MONO }}
+          title={path}
+        >
+          <FileCode size={10} className="shrink-0" style={{ color: 'var(--c-text3)' }} />
+          <span className="truncate" style={{ maxWidth: 480 }}>{path}</span>
+        </div>
+      )}
+      <ol className="space-y-2">
+        {steps.map((step, i) => (
+          <li key={i} className="flex gap-2">
+            <span
+              className="shrink-0 w-4 h-4 rounded-full inline-flex items-center justify-center text-[9px] font-bold"
+              style={{ background: 'var(--c-bg4,#272727)', color: 'var(--c-text2)' }}
+            >
+              {i + 1}
+            </span>
+            <div className="flex-1 min-w-0 space-y-1">
+              <div style={{ color: 'var(--c-white)' }}>{step.label}</div>
+              {step.detail && (
+                <div className="text-[10px]" style={{ color: 'var(--c-text2)' }}>
+                  {step.detail}
+                </div>
+              )}
+              {step.code && (
+                <div className="relative">
+                  <pre
+                    className="text-[10px] p-2 rounded overflow-x-auto"
+                    style={{ background: 'var(--c-code-bg, rgba(255,255,255,0.05))', color: 'var(--c-white)', fontFamily: MONO }}
+                  >
+                    {step.code}
+                  </pre>
+                  <button
+                    onClick={() => copyCode(step.code, i)}
+                    className="absolute top-1 right-1 min-w-8 min-h-8 inline-flex items-center justify-center rounded hover:bg-[var(--c-bg4,#222)] transition-[background-color,color,transform] active:scale-[0.96]"
+                    style={{ color: copiedStep === i ? '#10b981' : 'var(--c-text3)' }}
+                    title={copiedStep === i ? 'Copied!' : 'Copy snippet'}
+                  >
+                    {copiedStep === i ? <Check size={10} /> : <Copy size={10} />}
+                  </button>
+                </div>
+              )}
+            </div>
+          </li>
+        ))}
+      </ol>
+    </div>
+  )
+}
+
+function FindingField({ label, value, mono, color, title }) {
+  return (
+    <div className="flex flex-col min-w-0">
+      <span className="text-[9px] uppercase tracking-wider mb-0.5" style={{ color: 'var(--c-text3)' }}>{label}</span>
+      <span
+        className="text-[11px] font-medium truncate"
+        style={{ color: color || 'var(--c-white)', fontFamily: mono ? MONO : undefined }}
+        title={title}
+      >
+        {value}
+      </span>
+    </div>
+  )
 }
 
 function SuggestionCard({ sugg, open, onToggle }) {
@@ -101,28 +464,17 @@ function SuggestionCard({ sugg, open, onToggle }) {
     ? targetPath.slice(folder.length + 1)
     : (targetPath && targetPath.startsWith('/Users/') ? targetPath.replace(/^.*\/(\.cursor|\.claude)\//, '$1/') : targetPath)
 
-  const Field = ({ label, value, mono, color, title }) => (
-    <div className="flex flex-col min-w-0">
-      <span className="text-[9px] uppercase tracking-wider mb-0.5" style={{ color: 'var(--c-text3)' }}>{label}</span>
-      <span
-        className="text-[11px] font-medium truncate"
-        style={{ color: color || 'var(--c-white)', fontFamily: mono ? MONO : undefined }}
-        title={title}
-      >
-        {value}
-      </span>
-    </div>
-  )
-
   return (
     <div className="card overflow-hidden">
-      <button
-        onClick={onToggle}
-        className="w-full flex items-stretch text-left hover:bg-[var(--c-bg3)] transition"
-      >
+      <div className="flex items-stretch">
         <div className="shrink-0 w-1" style={{ background: sev.color }} />
 
-        <div className="flex-1 min-w-0 px-3 py-2.5 flex items-center gap-3">
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-expanded={open}
+          className="flex-1 min-w-0 min-h-12 px-3 py-2.5 flex items-center gap-3 text-left hover:bg-[var(--c-bg3)] transition-[background-color]"
+        >
           <div className="flex items-center justify-center shrink-0 w-7 h-7 rounded" style={{ background: sev.bg }}>
             <SevIcon size={14} style={{ color: sev.color }} />
           </div>
@@ -168,26 +520,24 @@ function SuggestionCard({ sugg, open, onToggle }) {
 
           {wastedUsd != null && wastedUsd > 0 && (
             <div className="shrink-0 text-right px-2.5 py-1 rounded" style={{ background: 'rgba(239,68,68,0.12)' }}>
-              <div className="text-[14px] font-bold" style={{ color: '#ef4444', fontFamily: MONO }}>{fmtUsd(wastedUsd)}</div>
+              <div className="text-[14px] font-bold tabular-nums" style={{ color: '#ef4444', fontFamily: MONO }}>{fmtUsd(wastedUsd)}</div>
               <div className="text-[9px] uppercase tracking-wide" style={{ color: '#ef4444' }}>est. waste</div>
             </div>
           )}
 
-          <span
-            role="button"
-            tabIndex={0}
+          {open ? <ChevronDown size={14} className="shrink-0" style={{ color: 'var(--c-text3)' }} /> : <ChevronRight size={14} className="shrink-0" style={{ color: 'var(--c-text3)' }} />}
+        </button>
+
+        <button
+            type="button"
             onClick={copy}
-            onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') copy(e) }}
-            className="shrink-0 p-1 rounded hover:bg-[var(--c-bg4,#222)]"
+            className="shrink-0 min-w-10 min-h-10 self-center inline-flex items-center justify-center rounded hover:bg-[var(--c-bg4,#222)] transition-[background-color,color,transform] active:scale-[0.96]"
             title={copied ? 'Copied!' : (open ? 'Copy full alert' : 'Copy title')}
             style={{ color: copied ? '#10b981' : 'var(--c-text3)', cursor: 'pointer' }}
           >
             {copied ? <Check size={14} /> : <Copy size={14} />}
-          </span>
-
-          {open ? <ChevronDown size={14} style={{ color: 'var(--c-text3)' }} /> : <ChevronRight size={14} style={{ color: 'var(--c-text3)' }} />}
-        </div>
-      </button>
+        </button>
+      </div>
 
       {open && (
         <div className="px-4 pb-3 pt-3" style={{ borderTop: '1px solid var(--c-border)' }}>
@@ -195,23 +545,23 @@ function SuggestionCard({ sugg, open, onToggle }) {
             className="grid gap-3 mb-3 pb-3"
             style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', borderBottom: '1px solid var(--c-border)' }}
           >
-            <Field label="Scope" value={scopePillLabel} color={scopePillColor} />
-            {!isGlobal && !isMulti && projectName && <Field label="Project" value={projectName} mono title={folder} />}
-            {!isGlobal && !isMulti && folder && <Field label="Folder" value={folder} mono title={folder} />}
-            {targetRel && <Field label="File" value={targetRel} mono title={targetPath} />}
-            <Field label="Category" value={cat.label} />
-            <Field label="Severity" value={sev.label} color={sev.color} />
+            <FindingField label="Scope" value={scopePillLabel} color={scopePillColor} />
+            {!isGlobal && !isMulti && projectName && <FindingField label="Project" value={projectName} mono title={folder} />}
+            {!isGlobal && !isMulti && folder && <FindingField label="Folder" value={folder} mono title={folder} />}
+            {targetRel && <FindingField label="File" value={targetRel} mono title={targetPath} />}
+            <FindingField label="Category" value={cat.label} />
+            <FindingField label="Severity" value={sev.label} color={sev.color} />
             {imp.tokensPerRequest != null && imp.tokensPerRequest > 0 && (
-              <Field label="Tok / turn" value={formatNumber(imp.tokensPerRequest)} mono />
+              <FindingField label="Tok / turn" value={formatNumber(imp.tokensPerRequest)} mono />
             )}
             {imp.requestsObserved != null && imp.requestsObserved > 0 && (
-              <Field label="Turns observed" value={formatNumber(imp.requestsObserved)} mono />
+              <FindingField label="Turns observed" value={formatNumber(imp.requestsObserved)} mono />
             )}
             {wastedTokens != null && wastedTokens > 0 && (
-              <Field label="Tok wasted" value={formatNumber(wastedTokens)} color="#f59e0b" mono />
+              <FindingField label="Tok wasted" value={formatNumber(wastedTokens)} color="#f59e0b" mono />
             )}
             {wastedUsd != null && wastedUsd > 0 && (
-              <Field label="Est. waste" value={fmtUsd(wastedUsd)} color="#ef4444" mono />
+              <FindingField label="Est. waste" value={fmtUsd(wastedUsd)} color="#ef4444" mono />
             )}
           </div>
 
@@ -234,32 +584,7 @@ function SuggestionCard({ sugg, open, onToggle }) {
           </div>
 
           {sugg.fix && (
-            <div
-              className="text-[11px] p-2 rounded"
-              style={{ background: 'var(--c-bg3)', border: '1px solid var(--c-border)' }}
-            >
-              <div className="flex items-center justify-between mb-1">
-                <div className="text-[10px] uppercase tracking-wider" style={{ color: 'var(--c-text3)' }}>Fix</div>
-                {sugg.fix.path && (
-                  <button
-                    onClick={copyPath}
-                    className="text-[10px] inline-flex items-center gap-1 px-1.5 py-0.5 rounded hover:bg-[var(--c-bg4,#222)] transition"
-                    style={{ color: pathCopied ? '#10b981' : 'var(--c-text3)' }}
-                    title={pathCopied ? 'Copied!' : 'Copy path'}
-                  >
-                    {pathCopied ? <Check size={10} /> : <Copy size={10} />}
-                    {pathCopied ? 'Copied' : 'Copy path'}
-                  </button>
-                )}
-              </div>
-              <div style={{ color: 'var(--c-white)' }}>{sugg.fix.hint}</div>
-              {sugg.fix.path && (
-                <div className="mt-1 text-[10px] flex items-center gap-1 truncate" style={{ color: 'var(--c-text3)', fontFamily: MONO }}>
-                  <ExternalLink size={9} />
-                  <span className="truncate" title={sugg.fix.path}>{sugg.fix.path}</span>
-                </div>
-              )}
-            </div>
+            <FixSteps sugg={sugg} onCopyPath={copyPath} pathCopied={pathCopied} />
           )}
         </div>
       )}
@@ -269,6 +594,9 @@ function SuggestionCard({ sugg, open, onToggle }) {
 
 function PricingNote({ pricing }) {
   const [open, setOpen] = useState(false)
+  const tierLabel = pricing.fallbackTier === 'cursor-auto' ? 'Cursor Auto rates' : 'fallback rates'
+  const ceiling = pricing.realCostCeiling != null ? pricing.realCostCeiling : pricing.realInputCostAtFallback
+  const hasReal = (pricing.realInputTokensObserved || 0) > 0
   return (
     <div
       className="text-[11px] px-2.5 py-1 rounded inline-flex flex-wrap items-center gap-2"
@@ -279,27 +607,30 @@ function PricingNote({ pricing }) {
       }}
     >
       <Info size={11} style={{ color: '#f59e0b' }} />
-      <span>$ figures estimated (Sonnet-tier fallback)</span>
-      {pricing.realInputTokensObserved > 0 && (
+      <span>$ figures estimated ({tierLabel})</span>
+      {hasReal && ceiling != null && (
         <span style={{ color: 'var(--c-text3)', fontFamily: MONO }}>
-          · ≈${pricing.realInputCostAtFallback.toFixed(2)} ceiling
+          · ≈${ceiling.toFixed(2)} observed ceiling
         </span>
       )}
       <button
         onClick={() => setOpen(!open)}
-        className="text-[10px] underline"
+        aria-expanded={open}
+        className="min-h-6 text-[10px] underline transition-[color,opacity] active:scale-[0.96]"
         style={{ color: '#f59e0b' }}
       >
         {open ? 'Hide' : 'Why?'}
       </button>
       {open && (
-        <div className="basis-full pt-1 mt-1" style={{ borderTop: '1px solid rgba(245,158,11,0.2)', color: 'var(--c-text2)' }}>
-          {pricing.note}
-          {pricing.realInputTokensObserved > 0 && (
-            <>
-              {' '}Real input observed: <strong>{formatNumber(pricing.realInputTokensObserved)}</strong> tokens ≈{' '}
-              <strong>${pricing.realInputCostAtFallback.toFixed(2)}</strong> at the same fallback rate — use as ceiling reference.
-            </>
+        <div className="basis-full pt-1 mt-1 space-y-1" style={{ borderTop: '1px solid rgba(245,158,11,0.2)', color: 'var(--c-text2)' }}>
+          <div>{pricing.note}</div>
+          {hasReal && (
+            <div>
+              Observed: <strong>{formatNumber(pricing.realInputTokensObserved)}</strong> input
+              {pricing.realCacheReadObserved > 0 && <> + <strong>{formatNumber(pricing.realCacheReadObserved)}</strong> cache</>}
+              {pricing.realOutputTokensObserved > 0 && <> + <strong>{formatNumber(pricing.realOutputTokensObserved)}</strong> output</>}
+              {' '}≈ <strong>${ceiling.toFixed(2)}</strong> at {tierLabel}. Actual spend depends on model mix (Sonnet/Opus/GPT-5 cost more).
+            </div>
           )}
         </div>
       )}
@@ -315,10 +646,11 @@ export default function Suggestions() {
   const [editor, setEditor] = useState(null)
   const [sortBy, setSortBy] = useState('severity')
   const [expandedIds, setExpandedIds] = useState(() => new Set())
-  const [collapsedGroups, setCollapsedGroups] = useState(() => new Set())
 
   useEffect(() => {
-    setLoading(true)
+    // Schedule the loading state so this effect only coordinates the async
+    // request, rather than triggering a synchronous render cascade.
+    queueMicrotask(() => setLoading(true))
     const editors = editor ? [editor] : SUPPORTED_EDITORS
     Promise.all(editors.map(ed => fetchSuggestions(ed).then(d => ({ ed, d }))))
       .then(results => {
@@ -389,19 +721,6 @@ export default function Suggestions() {
     return Array.from(set)
   }, [data])
 
-  const grouped = useMemo(() => {
-    if (editor) return null
-    const map = new Map()
-    for (const s of filtered) {
-      const k = s._editor || 'other'
-      if (!map.has(k)) map.set(k, { editor: k, items: [], usdTotal: 0 })
-      const g = map.get(k)
-      g.items.push(s)
-      g.usdTotal += wastedUsdOf(s)
-    }
-    return Array.from(map.values()).sort((a, b) => b.usdTotal - a.usdTotal)
-  }, [filtered, editor])
-
   const toggleOne = useCallback((id) => {
     setExpandedIds(prev => {
       const next = new Set(prev)
@@ -413,14 +732,6 @@ export default function Suggestions() {
   const expandAll = () => setExpandedIds(new Set(filtered.map(s => s.id)))
   const collapseAll = () => setExpandedIds(new Set())
   const allExpanded = filtered.length > 0 && filtered.every(s => expandedIds.has(s.id))
-
-  const toggleGroup = (k) => {
-    setCollapsedGroups(prev => {
-      const next = new Set(prev)
-      if (next.has(k)) next.delete(k); else next.add(k)
-      return next
-    })
-  }
 
   if (loading) return <AnimatedLoader label={`Analyzing ${editor ? editorLabel(editor) : 'all editors'} config...`} />
   if (!data || data.error) {
@@ -435,7 +746,7 @@ export default function Suggestions() {
     <div className="space-y-4">
       <PageHeader icon={Lightbulb} title="Cost & Hygiene Suggestions">
         <span className="text-[11px] ml-2" style={{ color: 'var(--c-text3)' }}>
-          {editor ? editorLabel(editor) : 'All editors'} · {data.projectsInspected} projects, {formatNumber(data.totalSessionsAnalyzed)} sessions analyzed
+          {editor ? editorLabel(editor) : 'All editors'} · <span className="tabular-nums">{data.projectsInspected}</span> projects, <span className="tabular-nums">{formatNumber(data.totalSessionsAnalyzed)}</span> sessions analyzed
         </span>
       </PageHeader>
 
@@ -447,7 +758,7 @@ export default function Suggestions() {
               <button
                 key={id}
                 onClick={() => setEditor(isSelected ? null : id)}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-[12px] cursor-pointer transition rounded-sm"
+                className="min-h-10 inline-flex items-center gap-1.5 px-2.5 py-1.5 text-[12px] cursor-pointer transition-[background-color,border-color,color,opacity,transform] active:scale-[0.96] rounded-sm"
                 style={{
                   border: isSelected ? `1.5px solid ${editorColor(id)}` : '1px solid var(--c-border)',
                   background: isSelected ? editorColor(id) + '15' : 'transparent',
@@ -463,23 +774,29 @@ export default function Suggestions() {
         </div>
       </div>
 
-      <div className="grid grid-cols-5 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
         <KpiCard label="Total" value={formatNumber(counts.total)} />
         <div className="card px-3 py-2">
-          <div className="text-base font-bold" style={{ color: '#ef4444' }}>{formatNumber(counts.high)}</div>
+          <div className="text-base font-bold tabular-nums" style={{ color: '#ef4444' }}>{formatNumber(counts.high)}</div>
           <div className="text-[11px]" style={{ color: 'var(--c-text2)' }}>High</div>
         </div>
         <div className="card px-3 py-2">
-          <div className="text-base font-bold" style={{ color: '#f59e0b' }}>{formatNumber(counts.medium)}</div>
+          <div className="text-base font-bold tabular-nums" style={{ color: '#f59e0b' }}>{formatNumber(counts.medium)}</div>
           <div className="text-[11px]" style={{ color: 'var(--c-text2)' }}>Medium</div>
         </div>
         <div className="card px-3 py-2">
-          <div className="text-base font-bold" style={{ color: '#3b82f6' }}>{formatNumber(counts.low)}</div>
+          <div className="text-base font-bold tabular-nums" style={{ color: '#3b82f6' }}>{formatNumber(counts.low)}</div>
           <div className="text-[11px]" style={{ color: 'var(--c-text2)' }}>Low</div>
         </div>
-        <div className="card px-3 py-2" title={data.pricing?.note || "Approximate input-token cost wasted on misconfigured always-on rules."}>
-          <div className="text-base font-bold" style={{ color: '#ef4444' }}>
-            {counts.usdTotal < 0.01 ? '<$0.01' : `~$${counts.usdTotal.toFixed(2)}`}
+        <div className="card px-3 py-2" title={data.pricing?.note || "Approximate input-token cost wasted on misconfigured always-on rules. Capped at real observed spend — per-suggestion $ may overlap."}>
+          <div className="text-base font-bold tabular-nums" style={{ color: '#ef4444' }}>
+            {(() => {
+              const ceiling = data.pricing?.realCostCeiling
+              const raw = counts.usdTotal
+              const capped = ceiling != null && ceiling > 0 ? Math.min(raw, ceiling) : raw
+              if (capped < 0.01) return '<$0.01'
+              return `${capped < raw ? '≤' : '~'}$${capped.toFixed(2)}`
+            })()}
           </div>
           <div className="text-[11px]" style={{ color: 'var(--c-text2)' }}>
             Est. waste so far{data.pricing?.estimated ? ' (est.)' : ''}
@@ -502,7 +819,7 @@ export default function Suggestions() {
             <button
               key={s}
               onClick={() => setSeverityFilter(s)}
-              className="text-[10px] px-2 py-0.5 rounded transition inline-flex items-center gap-1"
+              className="min-h-7 text-[10px] px-2 py-0.5 rounded transition-[background-color,border-color,color,opacity,transform] active:scale-[0.96] inline-flex items-center gap-1"
               style={{
                 background: active ? 'var(--c-card)' : 'transparent',
                 color: active ? (meta?.color || 'var(--c-white)') : 'var(--c-text2)',
@@ -525,7 +842,7 @@ export default function Suggestions() {
             <button
               key={c}
               onClick={() => setCategoryFilter(active ? null : c)}
-              className="text-[10px] px-2 py-0.5 rounded transition inline-flex items-center gap-1"
+              className="min-h-7 text-[10px] px-2 py-0.5 rounded transition-[background-color,border-color,color,opacity,transform] active:scale-[0.96] inline-flex items-center gap-1"
               style={{
                 background: active ? 'var(--c-card)' : 'transparent',
                 color: active ? 'var(--c-white)' : 'var(--c-text2)',
@@ -559,7 +876,7 @@ export default function Suggestions() {
             <div className="flex items-center gap-1.5">
               <button
                 onClick={() => setSortBy(sortBy === 'severity' ? 'waste' : 'severity')}
-                className="text-[10px] px-2 py-0.5 rounded transition inline-flex items-center gap-1"
+                className="min-h-8 text-[10px] px-2 py-0.5 rounded transition-[background-color,border-color,color,opacity,transform] active:scale-[0.96] inline-flex items-center gap-1"
                 style={{ background: 'transparent', color: 'var(--c-text2)', border: '1px solid var(--c-border)' }}
                 title="Toggle sort order"
               >
@@ -568,7 +885,7 @@ export default function Suggestions() {
               </button>
               <button
                 onClick={allExpanded ? collapseAll : expandAll}
-                className="text-[10px] px-2 py-0.5 rounded transition inline-flex items-center gap-1"
+                className="min-h-8 text-[10px] px-2 py-0.5 rounded transition-[background-color,border-color,color,opacity,transform] active:scale-[0.96] inline-flex items-center gap-1"
                 style={{ background: 'transparent', color: 'var(--c-text2)', border: '1px solid var(--c-border)' }}
               >
                 {allExpanded ? <ChevronsUp size={10} /> : <ChevronsDown size={10} />}
@@ -577,56 +894,16 @@ export default function Suggestions() {
             </div>
           </div>
 
-          {grouped ? (
-            <div className="space-y-4">
-              {grouped.map(g => {
-                const collapsed = collapsedGroups.has(g.editor)
-                const c = editorColor(g.editor)
-                return (
-                  <div key={g.editor} className="space-y-2">
-                    <button
-                      onClick={() => toggleGroup(g.editor)}
-                      className="w-full flex items-center gap-2 text-left py-1"
-                    >
-                      {collapsed ? <ChevronRight size={12} style={{ color: 'var(--c-text3)' }} /> : <ChevronDown size={12} style={{ color: 'var(--c-text3)' }} />}
-                      <EditorIcon source={g.editor} size={14} />
-                      <span className="text-[12px] font-semibold" style={{ color: 'var(--c-white)' }}>{editorLabel(g.editor)}</span>
-                      <span className="text-[10px] px-1.5 py-px rounded" style={{ background: c + '20', color: c }}>{g.items.length}</span>
-                      {g.usdTotal > 0 && (
-                        <span className="text-[10px]" style={{ color: 'var(--c-text3)', fontFamily: MONO }}>
-                          ~${g.usdTotal.toFixed(2)}
-                        </span>
-                      )}
-                      <div className="flex-1 h-px" style={{ background: 'var(--c-border)' }} />
-                    </button>
-                    {!collapsed && (
-                      <div className="space-y-2">
-                        {g.items.map(s => (
-                          <SuggestionCard
-                            key={s.id}
-                            sugg={s}
-                            open={expandedIds.has(s.id)}
-                            onToggle={() => toggleOne(s.id)}
-                          />
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )
-              })}
-            </div>
-          ) : (
-            <div className="space-y-2">
-              {filtered.map(s => (
-                <SuggestionCard
-                  key={s.id}
-                  sugg={s}
-                  open={expandedIds.has(s.id)}
-                  onToggle={() => toggleOne(s.id)}
-                />
-              ))}
-            </div>
-          )}
+          <div className="space-y-2">
+            {filtered.map(s => (
+              <SuggestionCard
+                key={s.id}
+                sugg={s}
+                open={expandedIds.has(s.id)}
+                onToggle={() => toggleOne(s.id)}
+              />
+            ))}
+          </div>
         </>
       )}
     </div>
